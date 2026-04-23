@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>图片元数据编辑器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <aside class="side-panel">
+          <div class="brand">
+            <span class="brand-mark">I</span>
+            <div>
+              <h1>图片元数据编辑器</h1>
+              <p>本地读取、编辑并导出图片元数据</p>
+            </div>
+          </div>
+
+          <label class="drop-zone" id="dropZone">
+            <input id="fileInput" type="file" accept="image/jpeg,image/png,image/webp,image/avif" />
+            <span class="upload-icon" aria-hidden="true">+</span>
+            <strong>选择或拖入图片</strong>
+            <small>支持 JPEG、PNG、WebP、AVIF</small>
+          </label>
+
+          <form class="url-loader" id="urlForm">
+            <label for="urlInput">图片 URL</label>
+            <div class="url-row">
+              <input id="urlInput" type="url" inputmode="url" placeholder="https://example.com/image.png" />
+              <button id="urlLoadBtn" type="submit">读取</button>
+            </div>
+          </form>
+
+          <div class="file-card" id="fileCard" hidden>
+            <img id="preview" alt="图片预览" />
+            <dl>
+              <div><dt>文件名</dt><dd id="fileName">-</dd></div>
+              <div><dt>类型</dt><dd id="fileType">-</dd></div>
+              <div><dt>大小</dt><dd id="fileSize">-</dd></div>
+            </dl>
+          </div>
+        </aside>
+
+        <section class="editor-panel">
+          <header class="toolbar">
+            <div class="status-block">
+              <span class="status-dot" id="statusDot"></span>
+              <span id="statusText">等待上传图片</span>
+              <span class="dirty-pill" id="dirtyPill" hidden>未保存</span>
+            </div>
+            <div class="actions">
+              <button id="undoBtn" type="button" disabled>撤销</button>
+              <button id="redoBtn" type="button" disabled>重做</button>
+              <button id="memoryBtn" type="button">记忆管理</button>
+              <button id="addRowBtn" type="button" disabled>新增字段</button>
+              <button id="saveBtn" type="button" disabled>保存图片</button>
+            </div>
+          </header>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>字段</th>
+                  <th>值</th>
+                  <th>来源</th>
+                  <th aria-label="操作"></th>
+                </tr>
+              </thead>
+              <tbody id="metadataBody">
+                <tr class="empty-row">
+                  <td colspan="4">上传图片后会在这里显示可编辑元数据。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog class="info-dialog" id="infoDialog">
+      <form class="info-modal" method="dialog">
+        <header class="info-modal-header">
+          <div>
+            <h2>信息读取</h2>
+            <p id="infoDialogSubtitle">从字段文本中读取参数</p>
+          </div>
+          <button class="icon-btn" id="closeInfoBtn" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="info-toolbar">
+          <button class="secondary-btn" id="addInfoFieldBtn" type="button">新增类型</button>
+        </div>
+        <div class="info-form" id="infoForm"></div>
+        <footer class="info-modal-footer">
+          <button class="secondary-btn" id="cancelInfoBtn" type="button">取消</button>
+          <button id="saveInfoBtn" type="button">保存到字段</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="preview-dialog" id="writePreviewDialog">
+      <form class="info-modal preview-modal" method="dialog">
+        <header class="info-modal-header preview-modal-header">
+          <div>
+            <h2>保存前预览</h2>
+            <p id="writePreviewSubtitle">确认即将写入图片的元数据</p>
+          </div>
+          <button class="icon-btn" id="closeWritePreviewBtn" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="save-name-panel">
+          <div class="save-name-header">
+            <h3>保存文件名</h3>
+            <p id="saveNamePreview">-</p>
+          </div>
+          <div class="save-name-mode" role="tablist" aria-label="保存文件名模式">
+            <label class="mode-chip">
+              <input id="saveNameModeSuffix" type="radio" name="saveNameMode" value="suffix" checked />
+              <span>添加后缀</span>
+            </label>
+            <label class="mode-chip">
+              <input id="saveNameModeRename" type="radio" name="saveNameMode" value="rename" />
+              <span>重新命名</span>
+            </label>
+          </div>
+          <div class="save-name-fields" id="saveNameSuffixFields" role="tabpanel" aria-labelledby="saveNameModeSuffix">
+            <label class="save-name-field">
+              <span>后缀</span>
+              <input id="saveSuffixInput" type="text" list="saveSuffixOptions" placeholder="ieditor" />
+              <datalist id="saveSuffixOptions"></datalist>
+            </label>
+            <label class="checkbox-row">
+              <input id="saveSuffixRemember" type="checkbox" />
+              <span>保存到常用后缀</span>
+            </label>
+            <label class="checkbox-row">
+              <input id="saveSuffixDefault" type="checkbox" />
+              <span>设为默认后缀</span>
+            </label>
+          </div>
+          <label class="save-name-field save-name-tab-panel is-hidden" id="saveNameRenameField" role="tabpanel" aria-labelledby="saveNameModeRename">
+            <span>新文件名</span>
+            <input id="saveRenameInput" type="text" placeholder="输入新的文件名" />
+          </label>
+        </div>
+        <pre class="write-preview" id="writePreviewText"></pre>
+        <footer class="info-modal-footer preview-modal-footer">
+          <button class="secondary-btn" id="cancelWritePreviewBtn" type="button">取消</button>
+          <button id="confirmSaveBtn" type="button">确认保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="info-dialog" id="memoryDialog">
+      <form class="info-modal" method="dialog">
+        <header class="info-modal-header">
+          <div>
+            <h2>记忆管理</h2>
+            <p>管理信息读取弹窗中的历史内容</p>
+          </div>
+          <button class="icon-btn" id="closeMemoryBtn" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="memory-list" id="memoryList"></div>
+        <footer class="info-modal-footer">
+          <button class="secondary-btn" id="clearMemoryBtn" type="button">清空全部</button>
+          <button id="saveMemoryBtn" type="button">保存记忆</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

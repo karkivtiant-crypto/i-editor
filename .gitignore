@@ -1,0 +1,14 @@
+node_modules/
+
+# Local runtime/config data
+app-config.json
+info-memory.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini

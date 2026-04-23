@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "start": "node start.js",
+    "serve": "node server.js",
+    "check": "node --check app.js && node --check metadata-core.js && node --check metadata-worker.js && node --check server.js && node --check start.js"
+  }
+}
