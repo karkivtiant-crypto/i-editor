@@ -429,14 +429,24 @@ function xmpToRows(xml) {
 }
 
 function scanXmpRows(bytes) {
-  const text = textDecoder.decode(bytes.slice(0, Math.min(bytes.length, 2_000_000)));
-  const rows = [];
-  const start = text.search(/<x:xmpmeta|<\?xpacket/);
-  if (start === -1) return rows;
-  const endTag = text.indexOf("</x:xmpmeta>", start);
-  const packetEnd = text.indexOf("<?xpacket end=", start);
-  const end = endTag !== -1 ? endTag + 12 : packetEnd !== -1 ? packetEnd + 60 : Math.min(text.length, start + 200000);
-  return xmpToRows(text.slice(start, end));
+  const scanEnd = Math.min(bytes.length, 2_000_000);
+  const xmpMetaStart = indexOfBytesInRange(bytes, asciiBytes("<x:xmpmeta"), 0, scanEnd);
+  const packetStart = indexOfBytesInRange(bytes, asciiBytes("<?xpacket"), 0, scanEnd);
+  const starts = [xmpMetaStart, packetStart].filter((index) => index !== -1);
+  if (starts.length === 0) return [];
+
+  const start = Math.min(...starts);
+  const decodeLimit = Math.min(bytes.length, start + 220_000);
+  const endTagPattern = asciiBytes("</x:xmpmeta>");
+  const packetEndPattern = asciiBytes("<?xpacket end=");
+  const endTag = indexOfBytesInRange(bytes, endTagPattern, start, decodeLimit);
+  const packetEnd = indexOfBytesInRange(bytes, packetEndPattern, start, decodeLimit);
+  const end = endTag !== -1
+    ? endTag + endTagPattern.length
+    : packetEnd !== -1
+      ? Math.min(bytes.length, packetEnd + 60)
+      : decodeLimit;
+  return xmpToRows(textDecoder.decode(bytes.slice(start, end)));
 }
 
 function buildXmp(rows) {
@@ -490,7 +500,12 @@ function startsWithAscii(bytes, value) {
 }
 
 function indexOfBytes(bytes, pattern) {
-  outer: for (let i = 0; i <= bytes.length - pattern.length; i += 1) {
+  return indexOfBytesInRange(bytes, pattern, 0, bytes.length);
+}
+
+function indexOfBytesInRange(bytes, pattern, start, end) {
+  const limit = Math.min(end, bytes.length) - pattern.length;
+  outer: for (let i = Math.max(0, start); i <= limit; i += 1) {
     for (let j = 0; j < pattern.length; j += 1) if (bytes[i + j] !== pattern[j]) continue outer;
     return i;
   }

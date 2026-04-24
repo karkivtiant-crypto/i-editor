@@ -21,13 +21,13 @@ worker.addEventListener("messageerror", () => {
 });
 
 export function readMetadataInWorker(bytes, type) {
-  const copy = new Uint8Array(bytes);
-  return callWorker("read", { bytes: copy, type }, [copy.buffer]);
+  const transferableBytes = new Uint8Array(bytes);
+  return callWorker("read", { bytes: transferableBytes, type }, [transferableBytes.buffer]);
 }
 
 export function writeImageInWorker(bytes, type, rows) {
-  const copy = new Uint8Array(bytes);
-  return callWorker("write", { bytes: copy, type, rows }, [copy.buffer]);
+  const transferableBytes = new Uint8Array(bytes);
+  return callWorker("write", { bytes: transferableBytes, type, rows }, [transferableBytes.buffer]);
 }
 
 export function buildPreviewInWorker(type, rows) {
