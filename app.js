@@ -94,10 +94,13 @@ const memoryStorageKey = "i-editor-info-memory";
 const configApiPath = "/api/app-config";
 const memoryApiPath = "/api/info-memory";
 const maxMemoryItemsPerType = 80;
+const memoryLockedTitle = "已锁定：保存信息读取弹窗时不会向此类型新增记忆。";
+const historyLimit = 100;
 
 let currentFile = null;
 let currentBytes = null;
 let currentType = "";
+let previewObjectUrl = "";
 let metadataRows = [];
 let visibleRowLimit = 0;
 let expandedLongRows = new Set();
@@ -114,8 +117,11 @@ let redoStack = [];
 let isDirty = false;
 let pendingSaveRows = null;
 let pendingSaveRandomSuffix = "";
+const exportInfoCache = new WeakMap();
 
 initializeLocalState();
+
+window.addEventListener("beforeunload", revokePreviewObjectUrl);
 
 fileInput.addEventListener("change", () => {
   const [file] = fileInput.files;
@@ -258,7 +264,9 @@ async function loadFile(file) {
   currentFile = file;
   currentType = type;
   currentBytes = new Uint8Array(await file.arrayBuffer());
-  preview.src = URL.createObjectURL(file);
+  revokePreviewObjectUrl();
+  previewObjectUrl = URL.createObjectURL(file);
+  preview.src = previewObjectUrl;
   fileName.textContent = file.name;
   fileType.textContent = type;
   fileSize.textContent = formatSize(file.size);
@@ -268,7 +276,7 @@ async function loadFile(file) {
   saveBtn.disabled = true;
   setStatus("正在后台解析元数据...", true);
   try {
-    metadataRows = await readMetadataInWorker(new Uint8Array(currentBytes), currentType);
+    metadataRows = await readMetadataInWorker(currentBytes, currentType);
     if (metadataRows.length === 0) metadataRows.push({ key: "Description", value: "", source: "自定义" });
     visibleRowLimit = Math.min(appConfig.initialVisibleRows, metadataRows.length);
     expandedLongRows = new Set();
@@ -290,18 +298,18 @@ function renderRows() {
   const fragment = document.createDocumentFragment();
 
   rowsToRender.forEach((row, index) => {
-    const exportInfo = detectExportableValue(row.value || "");
+    const exportInfo = getCachedExportInfo(row);
     const renderedValue = getRenderedFieldValue(row.value || "", index);
       const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><input class="cell-input" aria-label="字段名" value="${escapeAttr(row.key)}" /></td>
-      <td>
+      <td data-label="字段"><input class="cell-input" aria-label="字段名" value="${escapeAttr(row.key)}" /></td>
+      <td data-label="值">
         <textarea class="cell-textarea" aria-label="字段值"${renderedValue.collapsed ? " readonly" : ""}>${escapeHtml(renderedValue.value)}</textarea>
         ${renderedValue.isLong ? `<div class="field-note">${renderedValue.collapsed ? "字段内容较长，当前仅显示预览。" : "已载入全文，可直接编辑。"}</div>` : ""}
         ${renderedValue.isLong ? `<button class="secondary-btn fold-btn" type="button">${renderedValue.collapsed ? "解除折叠" : "折叠"}</button>` : ""}
       </td>
-      <td><span class="source-pill">${escapeHtml(row.source || "自定义")}</span></td>
-      <td>
+      <td data-label="来源"><span class="source-pill">${escapeHtml(row.source || "自定义")}</span></td>
+      <td data-label="操作">
         <div class="row-actions">
           ${exportInfo ? `<button class="export-btn label-btn" type="button">导出 ${escapeHtml(exportInfo.label)}</button>` : ""}
           <button class="inspect-btn" type="button" aria-label="信息读取" title="信息读取">i</button>
@@ -353,18 +361,23 @@ function updateRow(index, patch) {
 }
 
 function commitRows(mutator, dirty = true) {
-  undoStack.push(cloneRows(metadataRows));
-  if (undoStack.length > 100) undoStack.shift();
-  redoStack = [];
+  const beforeRows = metadataRows.slice();
   mutator();
-  if (dirty) setDirty(true);
+  const patch = createRowsPatch(beforeRows, metadataRows);
+  if (patch) {
+    undoStack.push(patch);
+    if (undoStack.length > historyLimit) undoStack.shift();
+    redoStack = [];
+    if (dirty) setDirty(true);
+  }
   renderRows();
 }
 
 function undo() {
   if (undoStack.length === 0) return;
-  redoStack.push(cloneRows(metadataRows));
-  metadataRows = undoStack.pop();
+  const patch = undoStack.pop();
+  applyRowsPatch(patch, "undo");
+  redoStack.push(patch);
   expandedLongRows = new Set();
   setDirty(true);
   renderRows();
@@ -372,8 +385,9 @@ function undo() {
 
 function redo() {
   if (redoStack.length === 0) return;
-  undoStack.push(cloneRows(metadataRows));
-  metadataRows = redoStack.pop();
+  const patch = redoStack.pop();
+  applyRowsPatch(patch, "redo");
+  undoStack.push(patch);
   expandedLongRows = new Set();
   setDirty(true);
   renderRows();
@@ -387,6 +401,37 @@ function updateHistoryButtons() {
 function setDirty(value) {
   isDirty = value;
   dirtyPill.hidden = !isDirty;
+}
+
+function createRowsPatch(beforeRows, afterRows) {
+  const minLength = Math.min(beforeRows.length, afterRows.length);
+  let start = 0;
+  while (start < minLength && beforeRows[start] === afterRows[start]) start += 1;
+
+  let beforeEnd = beforeRows.length - 1;
+  let afterEnd = afterRows.length - 1;
+  while (beforeEnd >= start && afterEnd >= start && beforeRows[beforeEnd] === afterRows[afterEnd]) {
+    beforeEnd -= 1;
+    afterEnd -= 1;
+  }
+
+  const beforeSlice = beforeRows.slice(start, beforeEnd + 1);
+  const afterSlice = afterRows.slice(start, afterEnd + 1);
+  if (beforeSlice.length === 0 && afterSlice.length === 0) return null;
+  return { index: start, beforeRows: beforeSlice, afterRows: afterSlice };
+}
+
+function applyRowsPatch(patch, direction) {
+  const undoing = direction === "undo";
+  const removeCount = undoing ? patch.afterRows.length : patch.beforeRows.length;
+  const insertRows = undoing ? patch.beforeRows : patch.afterRows;
+  metadataRows.splice(patch.index, removeCount, ...insertRows);
+}
+
+function revokePreviewObjectUrl() {
+  if (!previewObjectUrl) return;
+  URL.revokeObjectURL(previewObjectUrl);
+  previewObjectUrl = "";
 }
 
 async function openWritePreview() {
@@ -412,7 +457,7 @@ async function saveCurrentImage() {
     const rows = pendingSaveRows || collectRows();
     const saveNameConfig = readSaveNameConfig();
     confirmSaveBtn.disabled = true;
-    const output = await writeImageInWorker(new Uint8Array(currentBytes), currentType, rows);
+    const output = await writeImageInWorker(currentBytes, currentType, rows);
     const configSaved = await persistSaveNameConfig(saveNameConfig);
     const outputName = buildOutputName(currentFile.name, saveNameConfig);
     downloadBytes(output, outputName, currentType);
@@ -446,10 +491,13 @@ function closeInfoDialog() {
 function renderInfoForm(values) {
   infoForm.innerHTML = "";
   infoFieldNames.forEach((name) => {
+    const locked = isMemoryLocked(name);
     const field = document.createElement("div");
     field.className = "info-field";
+    if (locked) field.classList.add("memory-locked");
     const label = document.createElement("label");
     label.textContent = name;
+    if (locked) label.title = memoryLockedTitle;
     const input = name === "Lora hashes" || name === "Workflow" || name === "Prompt" || name === "Negative prompt"
       ? document.createElement("textarea")
       : document.createElement("input");
@@ -552,11 +600,25 @@ function splitInfoParts(text) {
   const parts = [];
   let current = "";
   let quoted = false;
+  let escaped = false;
+  let depth = 0;
   for (const char of text) {
-    if (char === '"') {
+    if (escaped) {
+      current += char;
+      escaped = false;
+    } else if (char === "\\") {
+      current += char;
+      escaped = true;
+    } else if (char === '"') {
       quoted = !quoted;
       current += char;
-    } else if (char === "," && !quoted) {
+    } else if (!quoted && "{[(".includes(char)) {
+      depth += 1;
+      current += char;
+    } else if (!quoted && "}])".includes(char)) {
+      depth = Math.max(0, depth - 1);
+      current += char;
+    } else if (char === "," && !quoted && depth === 0) {
       parts.push(current.trim());
       current = "";
     } else {
@@ -804,12 +866,11 @@ function renderMemoryManager() {
     group.className = "memory-group";
     group.innerHTML = `
       <div class="memory-group-header">
-        <h3>${escapeHtml(name)}</h3>
-        <button type="button" class="lock-memory-btn ${locked ? "locked" : ""}" data-type="${escapeAttr(name)}">
-          ${locked ? "解锁" : "锁定"}
+        <button type="button" class="lock-memory-btn ${locked ? "locked" : ""}" data-type="${escapeAttr(name)}" aria-label="${locked ? "解锁" : "锁定"} ${escapeAttr(name)}" title="${locked ? "解锁" : "锁定"}">
+          ${locked ? "🔒" : "🔓"}
         </button>
+        <h3 class="${locked ? "memory-locked-title" : ""}"${locked ? ` title="${escapeAttr(memoryLockedTitle)}"` : ""}>${escapeHtml(name)}</h3>
       </div>
-      ${locked ? '<p class="memory-lock-note">已锁定：保存信息读取弹窗时不会向此类型新增记忆。</p>' : ""}
     `;
     group.querySelector(".lock-memory-btn").addEventListener("click", async () => {
       appConfig.memoryLocks[name] = !isMemoryLocked(name);
@@ -947,27 +1008,24 @@ function buildRowsStatus() {
   return `已读取 ${metadataRows.length} 个元数据字段，当前显示 ${visibleRowLimit} 个`;
 }
 
-function cloneRows(rows) {
-  return rows.map((row) => ({ ...row }));
-}
-
 function exportFieldValue(rowIndex) {
   const row = metadataRows[rowIndex];
   const exportInfo = detectExportableValue(row.value || "", { includeBytes: true });
-  if (!exportInfo) return setStatus("该字段没有检测到可导出的完整文件内容", false);
+  if (!exportInfo) return setStatus("该字段没有可导出的内容", false);
   downloadBytes(exportInfo.bytes, buildFieldExportName(row.key, exportInfo.extension), exportInfo.mime);
   setStatus(`已导出 ${exportInfo.label} 文件`, true);
 }
 
 const textExportFormats = [
-  { extension: "svg", mime: "image/svg+xml", label: "SVG", test: (value) => /^<svg[\s>][\s\S]*<\/svg>\s*$/i.test(value) },
-  { extension: "json", mime: "application/json", label: "JSON", test: (value) => { try { JSON.parse(value); return /^[\[{]/.test(value); } catch { return false; } } },
-  { extension: "html", mime: "text/html", label: "HTML", test: (value) => /^(<!doctype\s+html|<html[\s>])/i.test(value) },
-  { extension: "xml", mime: "application/xml", label: "XML", test: (value) => /^<\?xml|^<[a-z][\w:.-]*[\s\S]*<\/[a-z][\w:.-]*>\s*$/i.test(value) },
-  { extension: "css", mime: "text/css", label: "CSS", test: (value) => /[^{]+\{[\s\S]*:[\s\S]*\}\s*$/.test(value) && !/^</.test(value) },
-  { extension: "js", mime: "text/javascript", label: "JS", test: (value) => /\b(function|const|let|var|import|export|class)\b/.test(value) },
-  { extension: "csv", mime: "text/csv", label: "CSV", test: (value) => value.split(/\r?\n/).filter(Boolean).length > 1 && value.includes(",") },
+  { extension: "json", mime: "application/json", label: "JSON", test: isJsonText },
+  { extension: "svg", mime: "image/svg+xml", label: "SVG", test: isSvgText },
+  { extension: "html", mime: "text/html", label: "HTML", test: isHtmlText },
+  { extension: "xml", mime: "application/xml", label: "XML", test: isXmlText },
+  { extension: "css", mime: "text/css", label: "CSS", test: isCssText },
+  { extension: "js", mime: "text/javascript", label: "JS", test: isJavaScriptText },
+  { extension: "csv", mime: "text/csv", label: "CSV", test: isCsvText },
 ];
+const txtExportFormat = { extension: "txt", mime: "text/plain;charset=utf-8", label: "TXT" };
 
 function detectExportableValue(value, options = {}) {
   const trimmed = String(value || "").trim();
@@ -976,9 +1034,131 @@ function detectExportableValue(value, options = {}) {
   if (dataUrl) return dataUrl;
   const base64File = parseBase64File(trimmed, options.includeBytes);
   if (base64File) return base64File;
-  const format = textExportFormats.find((item) => item.test(trimmed.length > 300000 ? `${trimmed.slice(0, 4096)}\n${trimmed.slice(-4096)}` : trimmed));
-  if (!format) return null;
+  const format = textExportFormats.find((item) => item.test(trimmed)) || txtExportFormat;
   return { ...format, bytes: options.includeBytes ? textEncoder.encode(trimmed) : null };
+}
+
+function getCachedExportInfo(row) {
+  const value = row.value || "";
+  const cached = exportInfoCache.get(row);
+  if (cached && cached.value === value) return cached.info;
+  const info = detectExportableValue(value);
+  exportInfoCache.set(row, { value, info });
+  return info;
+}
+
+function isJsonText(value) {
+  if (!/^[\[{]/.test(value)) return false;
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSvgText(value) {
+  return /^<svg(?:\s|>)[\s\S]*<\/svg>\s*$/i.test(value);
+}
+
+function isHtmlText(value) {
+  return /^(<!doctype\s+html\s*>[\s\S]*<html(?:\s|>)|<html(?:\s|>)[\s\S]*<\/html>\s*$)/i.test(value);
+}
+
+function isXmlText(value) {
+  if (!/^<\?xml[\s\S]*\?>\s*</i.test(value) && !/^<[a-z_][\w:.-]*(?:\s[^>]*)?>/i.test(value)) return false;
+  if (isSvgText(value) || isHtmlText(value)) return false;
+  const match = value.match(/^(?:<\?xml[\s\S]*?\?>\s*)?<([a-z_][\w:.-]*)(?:\s[^>]*)?>[\s\S]*<\/\1>\s*$/i);
+  return Boolean(match);
+}
+
+function isCssText(value) {
+  if (/^[<{[]/.test(value) || isJsonText(value)) return false;
+  const withoutComments = value.replace(/\/\*[\s\S]*?\*\//g, "").trim();
+  if (!withoutComments.includes("{") || !withoutComments.includes("}")) return false;
+  if (!hasBalancedCssBraces(withoutComments)) return false;
+
+  const rulePattern = /([^{}]+)\{([^{}]+)\}/g;
+  let remainder = withoutComments;
+  let hasRule = false;
+  let match;
+  while ((match = rulePattern.exec(withoutComments))) {
+    const selector = match[1].trim();
+    const body = match[2].trim();
+    if (!selector || selector.startsWith("{") || selector.startsWith("[") || selector.includes('"')) return false;
+    if (!/[.#\w*:[\]=>~+),-]/.test(selector)) return false;
+    if (!body.split(";").some(hasCssDeclaration)) return false;
+    remainder = remainder.replace(match[0], "");
+    hasRule = true;
+  }
+  return hasRule && remainder.trim() === "";
+}
+
+function hasCssDeclaration(part) {
+  const declaration = part.trim();
+  const separator = declaration.indexOf(":");
+  if (separator <= 0) return false;
+  const property = declaration.slice(0, separator).trim();
+  const propertyValue = declaration.slice(separator + 1).trim();
+  return /^-{0,2}[\w-]+$/.test(property) && propertyValue.length > 0;
+}
+
+function hasBalancedCssBraces(value) {
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (const char of value) {
+    if (escaped) {
+      escaped = false;
+    } else if (char === "\\") {
+      escaped = true;
+    } else if (quote) {
+      if (char === quote) quote = "";
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth < 0) return false;
+    }
+  }
+  return depth === 0 && !quote;
+}
+
+function isJavaScriptText(value) {
+  if (/^[<{[]/.test(value)) return false;
+  return /\b(import|export|function|class|const|let|var|async\s+function)\b|=>/.test(value);
+}
+
+function isCsvText(value) {
+  const lines = value.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) return false;
+  const delimiter = value.includes("\t") && !value.includes(",") ? "\t" : ",";
+  const widths = lines.map((line) => splitDelimitedLine(line, delimiter).length);
+  return widths[0] > 1 && widths.every((width) => width === widths[0]);
+}
+
+function splitDelimitedLine(line, delimiter) {
+  const cells = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === '"' && line[index + 1] === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === delimiter && !quoted) {
+      cells.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  cells.push(current);
+  return cells;
 }
 
 function parseDataUrl(value, includeBytes) {
@@ -986,7 +1166,11 @@ function parseDataUrl(value, includeBytes) {
   if (!match) return null;
   const mime = match[1] || "application/octet-stream";
   const extension = extensionFromMime(mime);
-  return { label: extension.toUpperCase(), extension, mime, bytes: includeBytes ? (match[2] ? base64ToBytes(match[3]) : textEncoder.encode(decodeURIComponent(match[3]))) : null };
+  try {
+    return { label: extension.toUpperCase(), extension, mime, bytes: includeBytes ? (match[2] ? base64ToBytes(match[3]) : textEncoder.encode(decodeURIComponent(match[3]))) : null };
+  } catch {
+    return null;
+  }
 }
 
 function parseBase64File(value, includeBytes) {
@@ -1109,6 +1293,7 @@ function extensionFromMime(mime) {
     "application/json": "json",
     "application/pdf": "pdf",
     "application/xml": "xml",
+    "text/plain": "txt",
     "text/html": "html",
     "text/css": "css",
     "text/javascript": "js",
